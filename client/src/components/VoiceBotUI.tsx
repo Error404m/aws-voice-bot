@@ -13,33 +13,28 @@ const VoiceBotUI: React.FC = () => {
     {
       id: "1",
       role: "assistant",
-      text: "Namaste 👋, I’m your AWS Live Voice Bot. Tap the mic and ask anything about AWS – in any language you like.",
+      text: "Namaste 👋, I'm your AWS Live Voice Bot. Tap the mic and ask anything about AWS – in any language you like.",
     },
   ]);
 
   const [isListening, setIsListening] = useState(false);
-  const [status, setStatus] = useState<string>("Idle");
-  const [dummyId, setDummyId] = useState(2);
-  const [streamHint, setStreamHint] = useState<string>("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [status, setStatus] = useState<string>("Ready");
 
-  // WebSocket state
-  const [wsStatus, setWsStatus] = useState<"idle" | "connecting" | "open" | "error">(
-    "idle"
-  );
+  // WebSocket
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Audio capture refs (input)
+  // Audio capture (input)
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
 
-  // Audio playback (output from Gemini Live)
+  // Audio playback (output)
   const audioContextOutRef = useRef<AudioContext | null>(null);
-  const playheadRef = useRef<number>(0); // schedule chunks sequentially
+  const playheadRef = useRef<number>(0);
 
-  // ========= Audio utils =========
+  // ========= Audio Utils =========
 
-  // Float32 [-1,1] → Int16 PCM
   const float32ToInt16 = (float32: Float32Array): Int16Array => {
     const len = float32.length;
     const int16 = new Int16Array(len);
@@ -50,7 +45,6 @@ const VoiceBotUI: React.FC = () => {
     return int16;
   };
 
-  // Ensure playback audio context (browser chooses sampleRate, will resample from 24k)
   const ensureOutputAudioContext = () => {
     if (!audioContextOutRef.current) {
       audioContextOutRef.current = new AudioContext();
@@ -59,7 +53,6 @@ const VoiceBotUI: React.FC = () => {
     return audioContextOutRef.current;
   };
 
-  // Wrap raw 16-bit PCM into a minimal WAV header so decodeAudioData can handle it
   const pcmToWav = (pcmBuffer: ArrayBuffer, sampleRate = 24000): ArrayBuffer => {
     const numChannels = 1;
     const bytesPerSample = 2;
@@ -77,26 +70,20 @@ const VoiceBotUI: React.FC = () => {
       }
     };
 
-    // RIFF header
     writeString(0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true); // file size - 8
+    view.setUint32(4, 36 + dataSize, true);
     writeString(8, "WAVE");
-
-    // fmt chunk
     writeString(12, "fmt ");
-    view.setUint32(16, 16, true); // PCM chunk size
-    view.setUint16(20, 1, true); // audio format = 1 (PCM)
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
     view.setUint16(22, numChannels, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, byteRate, true);
     view.setUint16(32, blockAlign, true);
-    view.setUint16(34, bytesPerSample * 8, true); // bits per sample (16)
-
-    // data chunk
+    view.setUint16(34, bytesPerSample * 8, true);
     writeString(36, "data");
     view.setUint32(40, dataSize, true);
 
-    // Copy PCM payload
     const pcmBytes = new Uint8Array(pcmBuffer);
     const wavBytes = new Uint8Array(buffer, headerSize);
     wavBytes.set(pcmBytes);
@@ -104,12 +91,9 @@ const VoiceBotUI: React.FC = () => {
     return buffer;
   };
 
-  // Play raw 16-bit PCM, 24kHz mono from ArrayBuffer using decodeAudioData
-  // and schedule sequentially (no overlap)
   const playPcm24kFromArrayBuffer = async (buffer: ArrayBuffer) => {
     try {
       const audioCtx = ensureOutputAudioContext();
-
       const wavBuffer = pcmToWav(buffer, 24000);
       const audioBuffer = await audioCtx.decodeAudioData(wavBuffer);
 
@@ -127,101 +111,70 @@ const VoiceBotUI: React.FC = () => {
     }
   };
 
-  // ========= Helper: WebSocket connection =========
+  // ========= Turn-based Logic =========
 
-  const connectWebSocket = (): Promise<WebSocket> => {
-    return new Promise((resolve, reject) => {
-      // if already open, reuse
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        resolve(wsRef.current);
-        return;
-      }
+  const startTurn = async () => {
+    if (isListening || isProcessing) return;
 
-      console.log("Connecting WebSocket to:", WS_URL);
-      setWsStatus("connecting");
-      setStatus("Connecting to backend…");
-
+    try {
+      // 1. Connect WebSocket
+      setStatus("Connecting...");
       const ws = new WebSocket(WS_URL);
-      ws.binaryType = "arraybuffer"; // we expect binary audio data
+      ws.binaryType = "arraybuffer";
 
-      ws.onopen = () => {
-        console.log("WebSocket opened");
-        wsRef.current = ws;
-        setWsStatus("open");
-        setStatus("Connected to Gemini Live backend.");
-        // reset playhead for new turn
-        const outCtx = ensureOutputAudioContext();
-        playheadRef.current = outCtx.currentTime;
-        resolve(ws);
-      };
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => {
+          console.log("✅ WebSocket connected");
+          wsRef.current = ws;
+          resolve();
+        };
+        ws.onerror = (err) => {
+          console.error("❌ WebSocket error:", err);
+          reject(err);
+        };
+      });
 
-      ws.onerror = (err) => {
-        console.error("WebSocket error:", err);
-        setWsStatus("error");
-        setStatus("WebSocket error – check backend.");
-        reject(err);
+      // 2. Handle incoming messages
+      ws.onmessage = async (event) => {
+        if (typeof event.data === "string") {
+          if (event.data === "RESPONSE_COMPLETE") {
+            console.log("✅ Response complete, ready for next turn");
+            setIsProcessing(false);
+            setStatus("Ready - Tap mic to speak again");
+          } else if (event.data === "ERROR") {
+            console.error("❌ Server error");
+            setIsProcessing(false);
+            setStatus("Error - Try again");
+          }
+        } else {
+          // Binary audio from Gemini
+          const arrayBuffer = event.data instanceof ArrayBuffer 
+            ? event.data 
+            : await event.data.arrayBuffer();
+          playPcm24kFromArrayBuffer(arrayBuffer);
+        }
       };
 
       ws.onclose = () => {
-        console.log("WebSocket closed");
+        console.log("🔌 WebSocket closed");
         wsRef.current = null;
-        setWsStatus("idle");
-        if (!isListening) {
-          setStatus("Idle");
+        if (isListening) {
+          stopListening();
         }
       };
 
-      ws.onmessage = async (event) => {
-        try {
-          const data = event.data;
-          let arrayBuffer: ArrayBuffer;
-
-          if (data instanceof ArrayBuffer) {
-            arrayBuffer = data;
-          } else if (data instanceof Blob) {
-            arrayBuffer = await data.arrayBuffer();
-          } else {
-            console.warn("Unknown WS message type", typeof data);
-            return;
-          }
-
-          // Stream playback: schedule each chunk in order
-          playPcm24kFromArrayBuffer(arrayBuffer);
-        } catch (err) {
-          console.error("Error handling WS message:", err);
-        }
-      };
-    });
-  };
-
-  // ========= Mic pipeline =========
-
-  // 🎙️ Start microphone + audio streaming
-  const startListening = async () => {
-    if (isListening) return;
-
-    try {
-      // 1) Ensure WebSocket to backend is open
-      const ws = await connectWebSocket();
-      if (ws.readyState !== WebSocket.OPEN) {
-        alert("WebSocket not open – check backend.");
-        return;
-      }
-
-      // 2) Ask for mic access
+      // 3. Start microphone
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      // 3) Create 16kHz audio context (matches Live input)
       const audioContext = new AudioContext({ sampleRate: 16000 });
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
       processor.onaudioprocess = (event) => {
-        const input = event.inputBuffer.getChannelData(0); // Float32
+        const input = event.inputBuffer.getChannelData(0);
         const pcm16 = float32ToInt16(input);
 
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(pcm16.buffer); // send raw bytes
+          ws.send(pcm16.buffer);
         }
       };
 
@@ -232,92 +185,80 @@ const VoiceBotUI: React.FC = () => {
       mediaStreamRef.current = stream;
       processorRef.current = processor;
 
+      // Reset playhead for new response
+      const outCtx = ensureOutputAudioContext();
+      playheadRef.current = outCtx.currentTime;
+
       setIsListening(true);
-      setStatus("Listening… streaming audio to Gemini Live");
-      setStreamHint("Streaming your voice at 16kHz PCM to backend…");
+      setStatus("🎤 Listening... Speak your AWS question");
+
     } catch (err) {
-      console.error("Mic / WS error:", err);
-      setStatus("Mic or WebSocket error – check console.");
-      setStreamHint("");
+      console.error("❌ Error starting turn:", err);
+      setStatus("Error - Check console");
     }
   };
 
-  // ⏹ Stop microphone streaming (but keep WS open until backend closes)
-const stopListening = () => {
-  if (!isListening) return;
+  const stopListening = () => {
+    if (!isListening) return;
 
-  if (processorRef.current) {
-    processorRef.current.disconnect();
-    processorRef.current.onaudioprocess = null;
-    processorRef.current = null;
-  }
+    // Stop microphone
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current.onaudioprocess = null;
+      processorRef.current = null;
+    }
 
-  if (audioContextRef.current) {
-    audioContextRef.current.close();
-    audioContextRef.current = null;
-  }
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
 
-  if (mediaStreamRef.current) {
-    mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-  }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
 
-  // 🔔 Tell backend that this audio stream has ended
-  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-    wsRef.current.send("AUDIO_STREAM_END");
-  }
+    // Send END_TURN signal
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log("✋ Sending END_TURN to server");
+      wsRef.current.send("END_TURN");
+    }
 
-  setIsListening(false);
-  setStatus(wsStatus === "open" ? "Waiting for bot response…" : "Idle");
-  setStreamHint("");
-};
-
+    setIsListening(false);
+    setIsProcessing(true);
+    setStatus("🤖 Processing... Gemini is responding");
+  };
 
   const handleMicToggle = () => {
-    if (!isListening) {
-      startListening();
-    } else {
+    if (!isListening && !isProcessing) {
+      startTurn();
+    } else if (isListening) {
       stopListening();
     }
   };
 
-  // ========= Demo simulate button (still useful) =========
+  const statusColor = isListening 
+    ? "#22c55e" 
+    : isProcessing 
+    ? "#f59e0b" 
+    : "#9ca3af";
 
-  const simulateTurn = () => {
-    const userText = "How do I create an S3 bucket in Mumbai region?";
-    const botText =
-      "To create an S3 bucket in ap-south-1 (Mumbai): open the S3 console, click “Create bucket”, choose a globally unique name, select region ap-south-1, keep public access blocked by default, and enable bucket versioning if you need object history.";
-
-    setMessages((prev) => [
-      ...prev,
-      { id: String(dummyId), role: "user", text: userText },
-      { id: String(dummyId + 1), role: "assistant", text: botText },
-    ]);
-    setDummyId((id) => id + 2);
-  };
-
-  const statusColor =
-    status.startsWith("Listening") || isListening ? "#22c55e" : "#9ca3af";
-
-  const wsLabel =
-    wsStatus === "idle"
-      ? "WS: idle"
-      : wsStatus === "connecting"
-      ? "WS: connecting…"
-      : wsStatus === "open"
-      ? "WS: connected"
-      : "WS: error";
+  const micButtonStyle = isListening
+    ? styles.micButtonActive
+    : isProcessing
+    ? styles.micButtonProcessing
+    : styles.micButton;
 
   return (
     <div style={styles.wrapper}>
-      {/* Top status row */}
+      {/* Status */}
       <div style={styles.statusRow}>
         <div style={styles.botIdentity}>
           <div style={styles.botAvatar}>🤖</div>
           <div>
-            <div style={styles.botName}>AWS Help Bot (Live)</div>
+            <div style={styles.botName}>AWS Help Bot (Turn-based)</div>
             <div style={styles.botSubtitle}>
-              Native audio Gemini backend • AWS-focused assistant
+              Speak → Gemini responds → Speak again
             </div>
           </div>
         </div>
@@ -329,11 +270,10 @@ const stopListening = () => {
             }}
           />
           <span style={styles.statusText}>{status}</span>
-          <span style={styles.wsBadge}>{wsLabel}</span>
         </div>
       </div>
 
-      {/* Chat window (still text-only, audio is separate) */}
+      {/* Chat (optional visual feedback) */}
       <div style={styles.chatContainer}>
         <div style={styles.chatInner}>
           {messages.map((msg) => (
@@ -366,41 +306,42 @@ const stopListening = () => {
             </div>
           ))}
 
-          {/* Small hint while streaming audio */}
-          {isListening && streamHint && (
+          {isListening && (
             <div style={{ ...styles.messageRow, justifyContent: "flex-end" }}>
               <div style={styles.smallAvatarUser}>🧑</div>
-              <div
-                style={{
-                  ...styles.bubble,
-                  ...styles.userBubble,
-                  opacity: 0.85,
-                }}
-              >
-                <div style={styles.bubbleText}>{streamHint}</div>
-                <div style={styles.bubbleStatus}>
-                  Audio ↔ Gemini Live (no text transcript yet)
-                </div>
+              <div style={{ ...styles.bubble, ...styles.userBubble }}>
+                <div style={styles.bubbleText}>🎤 Recording...</div>
+              </div>
+            </div>
+          )}
+
+          {isProcessing && (
+            <div style={{ ...styles.messageRow, justifyContent: "flex-start" }}>
+              <div style={styles.smallAvatar}>🤖</div>
+              <div style={{ ...styles.bubble, ...styles.botBubble }}>
+                <div style={styles.bubbleText}>🤔 Thinking...</div>
               </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* Bottom controls */}
+      {/* Controls */}
       <div style={styles.bottomBar}>
-        <button onClick={simulateTurn} style={styles.secondaryButton}>
-          Simulate AWS Q&A (text)
-        </button>
-
         <div style={styles.micArea}>
           <span style={styles.micHint}>
             {isListening
-              ? "Listening… speak your AWS question."
-              : "Tap the mic and speak your AWS question."}
+              ? "Click to stop and send ⏹"
+              : isProcessing
+              ? "Waiting for response..."
+              : "Click to speak 🎙️"}
           </span>
-          <button onClick={handleMicToggle} style={styles.micButton}>
-            {isListening ? "⏹" : "🎙️"}
+          <button 
+            onClick={handleMicToggle} 
+            style={micButtonStyle}
+            disabled={isProcessing}
+          >
+            {isListening ? "⏹" : isProcessing ? "⏳" : "🎙️"}
           </button>
         </div>
       </div>
@@ -462,18 +403,9 @@ const styles: { [key: string]: React.CSSProperties } = {
   statusText: {
     color: "#e5e7eb",
   },
-  wsBadge: {
-    marginLeft: 6,
-    padding: "2px 8px",
-    borderRadius: "999px",
-    border: "1px solid #4b5563",
-    fontSize: "10px",
-    color: "#e5e7eb",
-  },
   chatContainer: {
     flex: 1,
     borderRadius: "16px",
-    // border: "1px solid "#1f2937",
     background:
       "radial-gradient(circle at top left, rgba(59,130,246,0.10), transparent 55%), #020617",
     overflow: "hidden",
@@ -508,14 +440,8 @@ const styles: { [key: string]: React.CSSProperties } = {
     background: "#020617",
     color: "#e5e7eb",
     borderBottomLeftRadius: "4px",
-    // border: "1px solid "#1e293b",
   },
   bubbleText: {},
-  bubbleStatus: {
-    marginTop: "3px",
-    fontSize: "10px",
-    opacity: 0.7,
-  },
   smallAvatar: {
     width: "26px",
     height: "26px",
@@ -539,17 +465,8 @@ const styles: { [key: string]: React.CSSProperties } = {
   bottomBar: {
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
+    justifyContent: "center",
     gap: "12px",
-  },
-  secondaryButton: {
-    padding: "8px 14px",
-    borderRadius: "999px",
-    // border: "1px solid "#4b5563",
-    background: "transparent",
-    color: "#e5e7eb",
-    fontSize: "12px",
-    cursor: "pointer",
   },
   micArea: {
     display: "flex",
@@ -573,6 +490,35 @@ const styles: { [key: string]: React.CSSProperties } = {
     background:
       "radial-gradient(circle at 30% 30%, rgba(34,197,94,1), rgba(21,128,61,1))",
     boxShadow: "0 0 24px rgba(34,197,94,0.5)",
+  },
+  micButtonActive: {
+    width: "52px",
+    height: "52px",
+    borderRadius: "999px",
+    border: "none",
+    fontSize: "24px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    background:
+      "radial-gradient(circle at 30% 30%, rgba(239,68,68,1), rgba(185,28,28,1))",
+    boxShadow: "0 0 24px rgba(239,68,68,0.5)",
+  },
+  micButtonProcessing: {
+    width: "52px",
+    height: "52px",
+    borderRadius: "999px",
+    border: "none",
+    fontSize: "24px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "not-allowed",
+    background:
+      "radial-gradient(circle at 30% 30%, rgba(245,158,11,1), rgba(180,83,9,1))",
+    boxShadow: "0 0 24px rgba(245,158,11,0.5)",
+    opacity: 0.7,
   },
 };
 
