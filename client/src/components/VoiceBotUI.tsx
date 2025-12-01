@@ -243,29 +243,35 @@ const VoiceBotUI: React.FC = () => {
   };
 
   // ⏹ Stop microphone streaming (but keep WS open until backend closes)
-  const stopListening = () => {
-    if (!isListening) return;
+const stopListening = () => {
+  if (!isListening) return;
 
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current.onaudioprocess = null;
-      processorRef.current = null;
-    }
+  if (processorRef.current) {
+    processorRef.current.disconnect();
+    processorRef.current.onaudioprocess = null;
+    processorRef.current = null;
+  }
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
+  if (audioContextRef.current) {
+    audioContextRef.current.close();
+    audioContextRef.current = null;
+  }
 
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((t) => t.stop());
-      mediaStreamRef.current = null;
-    }
+  if (mediaStreamRef.current) {
+    mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+  }
 
-    setIsListening(false);
-    setStatus(wsStatus === "open" ? "Waiting for bot response…" : "Idle");
-    setStreamHint("");
-  };
+  // 🔔 Tell backend that this audio stream has ended
+  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+    wsRef.current.send("AUDIO_STREAM_END");
+  }
+
+  setIsListening(false);
+  setStatus(wsStatus === "open" ? "Waiting for bot response…" : "Idle");
+  setStreamHint("");
+};
+
 
   const handleMicToggle = () => {
     if (!isListening) {
