@@ -250,6 +250,11 @@ Make sure your chosen model supports **native audio** and **streaming**.
 
 ---
 
+## Demo
+[▶️ Watch Video](https://raw.githubusercontent.com/Error404m/aws-voice-bot/main/Screen%20Recording%202025-12-01%20at%205.28.55%20PM.mp4)
+
+---
+
 ## License
 
 Add your preferred license here, for example:
