@@ -9,6 +9,8 @@ A real-time **voice-first** assistant for AWS, powered by **Gemini 2.5 Native Au
 - **Multilingual** support (Hindi, English, Marathi, Gujarati, Tamil, Kannada, etc.)
 
 ---
+![Welcome](https://raw.githubusercontent.com/Error404m/aws-voice-bot/main/Welcome.png)
+
 
 ## What this project does
 
