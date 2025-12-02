@@ -12,7 +12,7 @@ The system uses **WebSockets** for bi-directional streaming, making conversation
 
 ---
 
-## 🚀 Features
+## Features
 
 - **Real-Time Streaming**  
   Transcribes audio chunks instantly without waiting for complete audio.
@@ -24,12 +24,12 @@ The system uses **WebSockets** for bi-directional streaming, making conversation
   Default: **Indian English (en-IN)**  
   Fallbacks: **Hindi, Tamil, French**
 
-- **100% TypeScript**  
+- **TypeScript**  
   Strong types and maintainable code.
 
 ---
 
-## 📌 Prerequisites
+##  Prerequisites
 
 Before starting, ensure you have:
 
@@ -40,7 +40,7 @@ Before starting, ensure you have:
 
 ---
 
-## 🛠️ Installation & Setup
+## Installation & Setup
 
 ### 1. Clone & Install
 
